@@ -1,0 +1,7 @@
+fastapi
+DingtalkChatbot
+uvicorn
+python-gitlab
+decouple
+pandora
+python-decouple==3.3
