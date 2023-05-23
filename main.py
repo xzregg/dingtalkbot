@@ -7,23 +7,24 @@ import json
 import signal
 import time
 import urllib
-import uuid
 from typing import Any
 
 import addict
 import uvicorn
+import xmltodict
 from fastapi import Body, Request
 from fastapi import FastAPI, Response
 from fastapi import Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from decouple import config
-from chat_server import ChatBotServer, Questions, ChatGPT
+from wechatpy.utils import to_text
+
+from chat_server import ChatBotServer, Questions
+from cosplay import SensitiveRole
 from dingtalk import DingtalkChatbot, MsgMakerDingtalkChatbot
-from cosplay import get_role_prompt, SensitiveRole
 from model import ConversationsModel
-from weworkapi.callback.WXBizMsgCrypt3 import WXBizMsgCrypt
+from sdk.wxbot.WXBizMsgCrypt import WXBizMsgCrypt
 
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="static", html=True), name="static")
@@ -35,12 +36,8 @@ app.add_middleware(
         allow_headers=["*"],
 )
 
-gpt_bot = ChatBotServer(ChatGPT())
-
-CDN_HOST = config('CDN_HOST', 'http://dink.frp.debug.packertec.com')
-
+gpt_bot = ChatBotServer()
 ding_msg_maker = MsgMakerDingtalkChatbot('')
-ALLOW_PRIVATE_USERS = config('ALLOW_PRIVATE_USERS', '')
 
 
 @app.post('/qywx')
@@ -59,6 +56,37 @@ async def qywx(msg_signature: str = '', timestamp: str = 0, nonce: str = "", ech
     return Response(message)
 
 
+@app.post('/wxbot')
+async def wxbot(body: dict = Body(...), request: Request = None) -> Any:
+    """
+    https://developers.weixin.qq.com/doc/aispeech/confapi/thirdkefu/recivemsg.html#%E5%AF%B9%E8%AF%9D%E6%9D%A5%E6%BA%90-from
+    :param body:
+    :param request:
+    :return:
+    """
+
+    APPID = 'oaOlEBSG41q5X2v'
+    Token = 'i1b1JNJTL3w56t5vQdSh87r7n4YZoP'
+    AESKey = 'LOzU5mgPDnUSUrqOjZBpP8yNAsRj5MGSw6OH6K7YFuU'
+    encrypted_b64 = body.get('encrypted')
+    wx_bot = WXBizMsgCrypt(Token, AESKey, APPID)
+    ret, decryp_xml = wx_bot.Decrypt(encrypted_b64)
+    if ret == 0:
+        # {'userid': '5m5WQGyzDqj', 'appid': 'i1b1JNJTL3w56t5vQdSh87r7n4YZoP', 'content': {'msg': 'asd'}, 'from': '0', 'status': '0', 'kfstate': '0', 'channel': '7', 'msgtype': 'text', 'assessment': None, 'waiterid': 'i1b1JNJTL3w56t5vQdSh87r7n4YZoP', 'waitername': None, 'waiteravatar': None, 'createtime': '1684742325250'}
+        data = xmltodict.parse(to_text(decryp_xml))['xml']
+        userid = data['userid']
+        channel = data['channel']
+        text = data['content'].get('msg', '')
+        event = data.get('event')
+        if data['from'] == '0' and isinstance(text, str) and text:
+            def send_msg(q: Questions, reply):
+                wx_bot.send_msg(reply, userid, channel)
+
+            msg = gpt_bot.check_talk(text.strip(), data, userid, '', send_msg)
+            ret = wx_bot.send_msg(msg, userid, channel)
+    return ret
+
+
 @app.get('/')
 async def dinkbot_get(request: Request = None):
     timestamp = str(round(time.time() * 1000))
@@ -73,11 +101,7 @@ async def dinkbot_get(request: Request = None):
     return Response(sign)
 
 
-def generate_prompt_link(prompt_id):
-    return f'{CDN_HOST}/static/dist/index.html?id={prompt_id}'
-
-
-@app.post('/')
+@app.post('/dinkbot')
 async def dinkbot(body: dict = Body(...), request: Request = None) -> Any:
     """
     {
@@ -127,10 +151,7 @@ async def dinkbot(body: dict = Body(...), request: Request = None) -> Any:
     is_at_all = not at_dingtalk_ids
     text = text.strip()
 
-    if not data.conversationTitle and ALLOW_PRIVATE_USERS and ALLOW_PRIVATE_USERS.find(senderStaffId) == -1:
-        msg = '管理员设置支持私聊'
-        text = ''
-
+    conversationTitle = data.conversationTitle
     if text:
         def send_ding(q: Questions, reply):
             prompt = q.text
@@ -144,24 +165,10 @@ async def dinkbot(body: dict = Body(...), request: Request = None) -> Any:
                 _is_at_all = True
             prompt = prompt.strip().split('\n')[-1][-50:]
             # reply = html.escape(reply)
-            prompt_link = generate_prompt_link(q.message_id)
+            prompt_link = gpt_bot.generate_prompt_link(q.message_id)
             DingtalkChatbot(data['sessionWebhook']).send_markdown(f'{prompt}', f'>{_at_text} [{prompt}]({prompt_link}):\n\n{reply}', at_dingtalk_ids=_at_dingtalk_ids, is_at_all=_is_at_all)
 
-        if text[0] == '/':
-            msg = gpt_bot.process_command(text, data, send_ding)
-        else:
-            if gpt_bot.is_full():
-                msg = '机器人队列已满,请稍后再提问! %s ' % gpt_bot.get_current_qsize_text()
-            else:
-                msg, text = get_role_prompt(data.conversationTitle or '', text)
-                if not msg:
-                    prompt_id = gpt_bot.add_async_talk(text, data, send_ding)
-                    if prompt_id:
-                        msg = '已收到,请留意回答! %s' % gpt_bot.get_current_qsize_text()
-                        prompt_link = generate_prompt_link(prompt_id)
-                        msg = f'{msg} [查看实时响应]({prompt_link})'
-                    else:
-                        msg = '机器人提交失败,请稍后再提问!'
+        msg = gpt_bot.check_talk(text, data, senderStaffId, conversationTitle, send_ding)
 
     return ding_msg_maker.send_markdown(msg, f'{at_text} {msg}', at_dingtalk_ids=at_dingtalk_ids, is_at_all=is_at_all)
 
@@ -177,6 +184,14 @@ async def gpt_prompt(body: dict = Body(...), request: Request = None):
     return JSONResponse(result)
 
 
+@app.post('/api/session_list')
+async def get_session_list(body: dict = Body(...), request: Request = None):
+    sid = body.get('sid', '')
+    result = ConversationsModel.search({'term': {'session_id': sid}}, size=20)['hits']
+    result = [item['_source'] for item in result]
+    return JSONResponse(result)
+
+
 @app.post("/api/chat-process")
 async def chat_process(body: dict = Body(...), request: Request = None):
     """ 额外的对话
@@ -188,17 +203,19 @@ async def chat_process(body: dict = Body(...), request: Request = None):
     prompt = body.get('prompt', '').strip()
     conversationId = body.get('options', {}).get('conversationId', '')
     parentMessageId = body.get('options', {}).get('parentMessageId', '')
+    session_id = body.get('options', {}).get('sid', '')
 
     data = {}
     data['end'] = False
     data['id'] = prompt_id
     if not prompt_id and prompt:
-        errmsg, prompt = SensitiveRole().get_prompt(prompt)
+        errmsg, hint_prompt = SensitiveRole().get_prompt_tpl(prompt)
         if errmsg:
             data['text'] = errmsg
             data['end'] = True
         else:
-            prompt_id = gpt_bot.add_async_talk(prompt, body, lambda d, s: '', parentMessageId)
+            text = hint_prompt % prompt
+            prompt_id = gpt_bot.add_async_talk(text, body, lambda d, s: '', parentMessageId, hint=hint_prompt, session_id=session_id)
             if not prompt_id:
                 data['text'] = '机器人提交失败,请稍后再提问!'
                 data['end'] = True

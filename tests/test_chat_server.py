@@ -22,7 +22,7 @@ class TestChatBotServer(TestCase):
     /del 删除知识点 用法: /del 标题
         :return:
         """
-        chat_bot = ChatBotServer(ChatGPT())
+        chat_bot = ChatBotServer()
         cmd = '/q'
         res = chat_bot.process_command(cmd)
         print(res)
@@ -39,7 +39,7 @@ class TestChatBotServer(TestCase):
         print(res)
 
     def test_delete_command(self):
-        chat_bot = ChatBotServer(ChatGPT())
+        chat_bot = ChatBotServer()
 
         cmd = '/del 这个是标题1 \n测试一下增加Faq文档,更改的内容'
         res = chat_bot.process_command(cmd)

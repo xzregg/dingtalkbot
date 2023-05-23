@@ -1,0 +1,12 @@
+version: "3"
+services:
+  host:
+    image: registry.cn-shenzhen.aliyuncs.com/packer-devops/python:311-v4
+    command: sh start.sh
+    restart: always
+    volumes:
+      - .:/app
+    ports:
+      - "5001:5001"
+    extra_hosts:
+      - "elastic.packertec.com:47.106.14.225"

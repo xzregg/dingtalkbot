@@ -6,76 +6,53 @@
 # @Contact : xzregg@gmail.com
 # @Desc    :
 import json
-import signal
-from collections import OrderedDict
-from dataclasses import dataclass, field
 import queue
 import threading
+import time
 import traceback
+import typing
+import uuid
+from collections import OrderedDict
+from dataclasses import dataclass, field
 
-import httpx
 import vthread as vthread
 from decouple import config
-from pandora.bots.legacy import State as _State, ChatPrompt
-from pandora.bots.server import ChatBot
 
-from pandora.openai.api import ChatGPT as _ChatGPT
-from pandora.openai.utils import Console
-import typing
-
+from cosplay import get_role_prompt
 from model import ConversationsModel, KnowledgeModel
+from model import redis_client, get_cache, set_cache
+from openai.api import ChatGPT
+from openai.utils import Console
+
+CDN_HOST = config('CDN_HOST', 'http://dink.frp.debug.packertec.com')
+ALLOW_PRIVATE_USERS = config('ALLOW_PRIVATE_USERS', '')
+
+ACCESS_TOKEN = get_cache('OPENAI_ACCESS_TOKEN') or config('OPENAI_ACCESS_TOKEN', '')
+ACCESS_TOKEN = ACCESS_TOKEN.strip()
 
 
-class ChatGPT(_ChatGPT):
-    def __init__(self, access_tokens=config('ACCESS_TOKEN', ''), proxy=None):
-        if not isinstance(access_tokens, dict):
-            access_tokens = {'default': access_tokens}
-        super().__init__(access_tokens, proxy=proxy)
+class ChatPrompt:
+    def __init__(self, prompt: str = None, parent_id=None, message_id=None):
+        self.prompt = prompt
+        self.parent_id = parent_id or self.gen_message_id()
+        self.message_id = message_id or self.gen_message_id()
 
-    def update_token(self, access_token):
-        self.__init__(access_token)
+    @staticmethod
+    def gen_message_id():
+        return str(uuid.uuid4())
 
-    def _talk(self, prompt, model, message_id, parent_message_id, conversation_id=None, stream=True, token=None):
-        data = {
-                'action'           : 'next',
-                'messages'         : [
-                        {
-                                'id'     : message_id,
-                                'role'   : 'user',
-                                'author' : {
-                                        'role': 'user',
-                                },
-                                'content': {
-                                        'content_type': 'text',
-                                        'parts'       : [prompt],
-                                },
-                        }
-                ],
-                'model'            : model,
-                'parent_message_id': parent_message_id,
-        }
 
-        if conversation_id:
-            data['conversation_id'] = conversation_id
-
-        return self.__request_conversation(data, token)
-
-    async def _do_request_sse_(self, url, headers, data, queue, event):
-        async with httpx.AsyncClient(verify=self.ca_bundle, proxies=self.proxy) as client:
-            async with client.stream('POST', url, json=data, headers=headers, timeout=600) as resp:
-                try:
-                    async for line in self.__process_sse(resp):
-                        queue.put(line)
-
-                        if event.is_set():
-                            await client.aclose()
-                            break
-                except Exception as e:
-                    traceback.print_exc()
-                    yield await self.__process_sse_except(resp)
-                if event.is_set():
-                    await client.aclose()
-                queue.put(None)
+class State:
+    def __init__(self, title=None, conversation_id=None, model_slug=None, user_prompt=ChatPrompt(),
+                 chatgpt_prompt=ChatPrompt()):
+        self.title = title
+        self.conversation_id = conversation_id
+        self.model_slug = model_slug
+        self.user_prompt = user_prompt
+        self.chatgpt_prompt = chatgpt_prompt
+        self.user_prompts = []
+        self.edit_index = None
+        self.prompt_map = OrderedDict()
 
 
 class ChatBotServerException(Exception):
@@ -86,27 +63,23 @@ class ChatBotServerException(Exception):
         return self.errmsg
 
 
-class State(_State):
-    def __init__(self, title=None, conversation_id=None, model_slug=None, user_prompt=ChatPrompt(),
-                 chatgpt_prompt=ChatPrompt()):
-        super().__init__(title, conversation_id, model_slug, user_prompt, chatgpt_prompt)
-        self.prompt_map = OrderedDict()
-
-
 @dataclass
 class Questions:
     text: str
     data: dict
-    callback: typing.Callable[[str, typing.Dict, str], None] = lambda q, r: r
+    callback: typing.Callable = lambda q, r: r
     message_id: str = field(default_factory=ChatPrompt.gen_message_id)
     parent_id: str = ''
     hint: str = ''
     session_id: str = ''
 
 
-class ChatBotServer(ChatBot):
+TypeCallback = typing.Callable[[Questions, str], None]
+
+
+class ChatBotServer(object):
     def __init__(self, chatgpt: ChatGPT = None):
-        self.chatgpt = chatgpt
+        self.chatgpt = chatgpt or ChatGPT(ACCESS_TOKEN)
         self.token_key = self.chatgpt.default_token_key
         self.conversation_base = None
         self.state: State = None
@@ -121,6 +94,10 @@ class ChatBotServer(ChatBot):
         # self.model_slug = 'gpt-3.5-turbo-0301'
         self.init_conversation()
         self.run()
+
+    @staticmethod
+    def generate_prompt_link(prompt_id):
+        return f'{CDN_HOST}/static/dist/index.html?id={prompt_id}'
 
     def is_full(self):
         return self.questions_queue.qsize() >= self.max_answer_num
@@ -157,12 +134,39 @@ class ChatBotServer(ChatBot):
         self.t = t
 
     def set_state_prompt_map(self, q: Questions):
-        self.state.prompt_map.setdefault(q.message_id, {'id': q.message_id, 'conversation_id': self.state.conversation_id, 'content': {'parts': [q.text]}, 'parent_id': q.parent_id})
+        self.state.prompt_map.setdefault(q.message_id, {'id'        : q.message_id, 'conversation_id': self.state.conversation_id,
+                                                        'session_id': q.session_id, 'create_time': time.time(),
+                                                        'content'   : {'parts': [q.text]}, 'parent_id': q.parent_id})
 
-    def add_async_talk(self, text, data: dict, callback: Questions.callback, parent_id=''):
+    def check_talk(self, text, context: any, user_id='', conversation_title='', callback: TypeCallback = None):
+        msg = ''
+        if text[0] == '/':
+            msg = self.process_command(text, context, callback)
+        else:
+            if not conversation_title and ALLOW_PRIVATE_USERS and ALLOW_PRIVATE_USERS.find(user_id) == -1:
+                msg = '管理员设置不支持私聊'
+                text = ''
+
+            if self.is_full():
+                msg = '机器人队列已满,请稍后再提问! %s ' % self.get_current_qsize_text()
+                text = ''
+            if text:
+                msg, hint_text, prompt = get_role_prompt(conversation_title or '', text)
+                if not msg:
+                    text = hint_text.replace('%s', prompt)
+                    prompt_id = self.add_async_talk(text, context, callback, hint=hint_text)
+                    if prompt_id:
+                        msg = '已收到,请留意回答! %s' % self.get_current_qsize_text()
+                        prompt_link = self.generate_prompt_link(prompt_id)
+                        msg = f'{msg} [查看实时响应]({prompt_link})'
+                    else:
+                        msg = '机器人提交失败,请稍后再提问!'
+        return msg
+
+    def add_async_talk(self, text, data: dict, callback: TypeCallback, parent_id='', hint='', session_id=''):
         if not self.is_full():
             message_id = ChatPrompt.gen_message_id()
-            q = Questions(text, data, callback, message_id, parent_id)
+            q = Questions(text, data, callback, message_id, parent_id, hint, session_id or message_id)
             self.questions_queue.put(q)
             self.set_state_prompt_map(q)
             return message_id
@@ -173,12 +177,10 @@ class ChatBotServer(ChatBot):
     def init_conversation(self, title='钉钉'):
         """根据title初始化对话"""
         try:
-            with open('conversations.json', 'rb') as fp:
-                conversations = json.load(fp)
+            conversations = json.loads(redis_client.get('conversations.json').decode())
         except Exception as e:
             conversations = self.chatgpt.list_conversations(1, 10, token=self.token_key)
-            with open('conversations.json', 'wb') as fp:
-                json.dump(conversations, fp, ensure_ascii=False)
+            set_cache('conversations.json', conversations)
         if not conversations['total']:
             return None
         choices = ['c', 'r', 'dd']
@@ -205,12 +207,11 @@ class ChatBotServer(ChatBot):
 
     def __load_conversation(self, conversation_id):
         try:
-            with open(f'{conversation_id}.json', 'rb') as fp:
-                result = json.load(fp)
+            result = json.loads(get_cache(f'{conversation_id}.json'))
         except Exception as e:
             result = self.chatgpt.get_conversation(conversation_id, token=self.token_key)
-            with open(f'{conversation_id}.json', 'wb') as fp:
-                json.dump(result, fp, ensure_ascii=False)
+            set_cache(f'{conversation_id}.json', result)
+
         current_node_id = result['current_node']
         nodes = []
         while True:
@@ -246,8 +247,13 @@ class ChatBotServer(ChatBot):
     def get_current_qsize_text(self):
         return '当前队列 %s/%s' % (self.questions_queue.qsize(), self.max_answer_num)
 
-    def process_command(self, command, data: dict = None, callback: typing.Callable[[typing.Dict, str], None] = Questions.callback):
-        cmd_split = command.strip().lower().split(maxsplit=1)
+    def update_token(self, access_token):
+        access_token = access_token.strip()
+        redis_client.set('OPENAI_ACCESS_TOKEN', access_token)
+        self.chatgpt = ChatGPT(access_token, self.chatgpt.proxy)
+
+    def process_command(self, command, data: dict = None, callback: TypeCallback = Questions.callback):
+        cmd_split = command.strip().split(maxsplit=1)
 
         command = cmd_split[0].strip()
         text = cmd_split[-1].strip()
@@ -255,16 +261,18 @@ class ChatBotServer(ChatBot):
         if '/q' == command:
             return self.get_current_qsize_text()
         elif '/c' == command:
-            return '当前回答问题: %s' % self.current_question or '无'
+            return '当前回答问题: %s' % (self.current_question or '无')
         elif '/add' == command:
             return KnowledgeModel.index_from_text(text)
         elif '/del' == command:
             return KnowledgeModel.delete_from_title(text)
-        elif '/send_id' == command:
-            return f'你的发送id:{(data or {}).get("senderStaffid", "无")}'
+        elif '/_meid' == command:
+            return f'你的发送id:{(data or {}).get("senderStaffId", "无")}'
+        elif '/_me' == command:
+            return json.dumps(data, ensure_ascii=False)
         elif '/token' == command:
             token = text
-            self.chatgpt.update_token(token)
+            self.update_token.update_token(token)
             return '已更新Token'
         else:
             return self.get_print_usage()
@@ -283,7 +291,7 @@ class ChatBotServer(ChatBot):
     def talk(self, q: Questions):
         prompt = q.text
         message_id = q.message_id
-        parent_id = q.parent_id or self.state.chatgpt_prompt.message_id # 获取最后一次的 msg ID
+        parent_id = q.parent_id or self.state.chatgpt_prompt.message_id  # 获取最后一次的 msg ID
         first_prompt = not self.state.conversation_id
         if self.state.edit_index:
             idx = self.state.edit_index - 1

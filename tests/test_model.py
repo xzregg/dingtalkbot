@@ -5,14 +5,14 @@
 # @Software: PyCharm
 # @Contact : xzregg@gmail.com
 
+import random
 from pprint import pprint
 from unittest import TestCase
-from model import KnowledgeModel
 
-from elasticsearch import Elasticsearch
 from elasticsearch.helpers import bulk
 from faker import Faker
-import random
+
+from model import KnowledgeModel, ConversationsModel
 
 fake = Faker('zh_CN')  # 指定语言为中文
 
@@ -47,13 +47,21 @@ class TestModel(TestCase):
         print(res)
 
     def test_drop(self):
-        KnowledgeModel.drop()
-        KnowledgeModel.create_index()
+        ConversationsModel.drop()
+        ConversationsModel.create_index()
+
+    def test_delete_from_query(self):
+        KnowledgeModel.delete_from_query({"doc_type": "wiki"})
 
     def test_search(self):
-        res = KnowledgeModel.search('维系')
+        res = KnowledgeModel.search('功能模块的负责人')
         pprint(res, indent=4)
 
     def test_get(self):
         res = KnowledgeModel.get_index('oyeGM4gBAX9araRtwfvb')
         pprint(res, indent=4)
+
+    def test_ConversationsModel_search(self):
+        res = ConversationsModel.search({'term': {'session_id': 'ec65c741-7034-45fb-bf09-6c055dfe4c22'}}, size=20)['hits']
+        result = [item['_source'] for item in res]
+        pprint(result)

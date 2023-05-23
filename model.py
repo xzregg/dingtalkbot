@@ -7,10 +7,29 @@
 # @Desc    :
 import json
 
-from decouple import config
-from objectdict import ObjectDict
+import redis
 from addict import Addict
+from decouple import config
 from elasticsearch import Elasticsearch
+from objectdict import ObjectDict
+
+redis_client = redis.Redis.from_url(config('REDIS_URL'))
+REDIS_LOCK_TIMEOUT = 60
+
+
+def get_cache(name):
+    try:
+        content = redis_client.get(name)
+        return content.decode()
+    except Exception:
+        return ''
+
+
+def set_cache(key, value, **kwargs):
+    try:
+        return redis_client.set(key, json.dumps(value, ensure_ascii=False), **kwargs)
+    except Exception:
+        return ''
 
 
 class BaseEsModel(ObjectDict):
@@ -31,10 +50,13 @@ class BaseEsModel(ObjectDict):
         cls._es.indices.create(index=cls._es_index_name, body={"mappings": mapping}, ignore=400)
 
     @classmethod
-    def search(cls, query, size=5):
-        query = Addict(query)
-        query.size = size
-        res = cls._es.search(index=cls._es_index_name, body=query)
+    def search(cls, query, size=5, sort=None):
+        body = Addict()
+        body.query = query
+        body.size = size
+        if sort:
+            body.sort = sort
+        res = cls._es.search(index=cls._es_index_name, body=body)
         return res['hits']
 
     @classmethod
@@ -59,6 +81,12 @@ class BaseEsModel(ObjectDict):
     def drop(cls):
         cls._es.indices.delete(index=cls._es_index_name, ignore=[400, 404])
 
+    @classmethod
+    def delete_from_query(cls, field: dict = None):
+        query = {"query": {"match": field}}
+        result = cls._es.delete_by_query(index=cls._es_index_name, body=query)
+        return result
+
 
 class KnowledgeModel(BaseEsModel):
     _es = Elasticsearch(['https://elastic.packertec.com:443'],
@@ -77,10 +105,11 @@ class KnowledgeModel(BaseEsModel):
         mapping = {
                 "properties": {
                         "doc_type": {"type": "keyword"},
-                        "title"   : {"type": "text", "analyzer": "ik_max_word"},
-                        "content" : {"type": "text", "analyzer": "ik_max_word"},
+                        "title"   : {"type": "text", "analyzer": "ik_smart"},
+                        "content" : {"type": "text", "analyzer": "ik_smart"},  # ik_max_word
                         "catalog" : {"type": "keyword"},
-                        "author"  : {"type": "keyword"}
+                        "author"  : {"type": "keyword"},
+                        "link"    : {"type": "keyword"}
                 }
         }
         cls._es.indices.create(index=cls._es_index_name, body={"mappings": mapping}, ignore=400)
@@ -112,11 +141,11 @@ class KnowledgeModel(BaseEsModel):
                 {'term': {'doc_type': data.doc_type}}
         ]
         query.size = 1
-        search_results = cls._es.search(index=cls._es_index_name, body=query, _source=False)
-        if search_results['hits']['total']['value'] > 0:
-            index_id = search_results['hits']['hits'][0]['_id']
-        result = cls._es.index(index=cls._es_index_name, id=index_id, body=data)
-        # cls._es.commit()
+        with redis_client.lock(f"KnowledgeModel:INDEX:{data.title}", timeout=REDIS_LOCK_TIMEOUT):
+            search_results = cls._es.search(index=cls._es_index_name, body=query, _source=False)
+            if search_results['hits']['total']['value'] > 0:
+                index_id = search_results['hits']['hits'][0]['_id']
+            result = cls._es.index(index=cls._es_index_name, id=index_id, body=data)
         return f'[{title}] 更新成功!'
 
     @classmethod
@@ -135,13 +164,25 @@ class KnowledgeModel(BaseEsModel):
                 "title"  : {},
                 "content": {}
         }
+        query.highlight.pre_tags = ['`']
+        query.highlight.post_tags = ['`']
+        query.highlight.fragment_size = 300
+        query.highlight.number_of_fragments = 3
         query.query.bool.must = [
                 {
-                        "multi_match": {
-                                "query" : text,
-                                "fields": ["title", "content"]
+                        "bool": {
+                                "should": [
+                                        {"match": {"title": text}},
+                                        {"match": {"content": text}}
+                                ]
                         }
                 },
+                # {
+                #         "multi_match": {
+                #                 "query" : text,
+                #                 "fields": ["title", "content"]
+                #         }
+                # },
         ]
         if doc_type:
             query.query.bool.must.append({
@@ -158,6 +199,19 @@ class ConversationsModel(BaseEsModel):
                         verify_certs=False,
                         )
     _es_index_name = 'chat_conversations'
+
+    @classmethod
+    def create_index(cls):
+        pass
+        mapping = {
+                "properties": {
+                        "doc_type"  : {"type": "keyword"},
+                        "id"        : {"type": "keyword"},
+                        "session_id": {"type": "keyword"},
+                        "parent_id" : {"type": "keyword"},
+                }
+        }
+        cls._es.indices.create(index=cls._es_index_name, body={"mappings": mapping}, ignore=400)
 
     @classmethod
     def create(cls, data):

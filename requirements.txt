@@ -1,7 +1,14 @@
 fastapi
 DingtalkChatbot
 uvicorn
-python-gitlab
-decouple
-pandora
 python-decouple==3.3
+redis==3.3.11
+elasticsearch==7.13.4
+ulid-py==1.1.0
+addict==2.4.0
+objectdict==0.0.8
+vthread==0.1.5
+httpx
+rich
+pycryptodome==3.17
+wechatpy==1.8.18
