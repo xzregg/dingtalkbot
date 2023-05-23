@@ -72,6 +72,7 @@ class Questions:
     parent_id: str = ''
     hint: str = ''
     session_id: str = ''
+    author: str = ''
 
 
 TypeCallback = typing.Callable[[Questions, str], None]
@@ -136,7 +137,9 @@ class ChatBotServer(object):
     def set_state_prompt_map(self, q: Questions):
         self.state.prompt_map.setdefault(q.message_id, {'id'        : q.message_id, 'conversation_id': self.state.conversation_id,
                                                         'session_id': q.session_id, 'create_time': time.time(),
-                                                        'content'   : {'parts': [q.text]}, 'parent_id': q.parent_id})
+                                                        'content'   : {'parts': [q.text]},
+                                                        'parent_id' : q.parent_id,
+                                                        'author'    : q.author})
 
     def check_talk(self, text, context: any, user_id='', conversation_title='', callback: TypeCallback = None):
         msg = ''
@@ -154,7 +157,7 @@ class ChatBotServer(object):
                 msg, hint_text, prompt = get_role_prompt(conversation_title or '', text)
                 if not msg:
                     text = hint_text.replace('%s', prompt)
-                    prompt_id = self.add_async_talk(text, context, callback, hint=hint_text)
+                    prompt_id = self.add_async_talk(text, context, callback, hint=hint_text, author=user_id)
                     if prompt_id:
                         msg = '已收到,请留意回答! %s' % self.get_current_qsize_text()
                         prompt_link = self.generate_prompt_link(prompt_id)
@@ -163,10 +166,10 @@ class ChatBotServer(object):
                         msg = '机器人提交失败,请稍后再提问!'
         return msg
 
-    def add_async_talk(self, text, data: dict, callback: TypeCallback, parent_id='', hint='', session_id=''):
+    def add_async_talk(self, text, data: dict, callback: TypeCallback, parent_id='', hint='', session_id='', author=''):
         if not self.is_full():
             message_id = ChatPrompt.gen_message_id()
-            q = Questions(text, data, callback, message_id, parent_id, hint, session_id or message_id)
+            q = Questions(text, data, callback, message_id, parent_id, hint, session_id or message_id, author)
             self.questions_queue.put(q)
             self.set_state_prompt_map(q)
             return message_id
@@ -282,11 +285,11 @@ class ChatBotServer(object):
         return '''
 ```
 命令:
-    /q 列出当前队列
-    /c 当前问题
-    /add 按标题增加知识点,标题存在则覆盖更新 用法: /add 标题\n内容
+/q 列出当前队列
+/c 当前问题
+/add 按标题增加知识点,标题存在则覆盖更新 用法: /add 标题\n内容
 ```
-        '''
+    '''
 
     def talk(self, q: Questions):
         prompt = q.text
