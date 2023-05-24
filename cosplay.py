@@ -113,7 +113,7 @@ class SensitiveRolePrompt(BaseRolePrompt):
         for k in self.SENSITIVE_WORDS:
             if prompt.find(k) >= 0:
                 self.errmsg = '请不要使用包含敏感词汇的词语，这些词汇可能会引起不必要的冲突或误解。'
-                return self
+        return self
 
     def get_text(self):
         if self.errmsg:

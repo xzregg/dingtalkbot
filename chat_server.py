@@ -20,7 +20,7 @@ from decouple import config
 
 from cosplay import get_role_prompt
 from model import ConversationsModel, KnowledgeModel
-from model import redis_client, get_cache, set_cache
+from model import get_cache, set_cache
 from openai.api import ChatGPT
 from openai.utils import Console
 
@@ -183,7 +183,7 @@ class ChatBotServer(object):
     def init_conversation(self, title='钉钉'):
         """根据title初始化对话"""
         try:
-            conversations = json.loads(redis_client.get('conversations.json').decode())
+            conversations = get_cache('conversations.json')
         except Exception as e:
             conversations = self.chatgpt.list_conversations(1, 10, token=self.token_key)
             set_cache('conversations.json', conversations)
@@ -213,7 +213,7 @@ class ChatBotServer(object):
 
     def __load_conversation(self, conversation_id):
         try:
-            result = json.loads(get_cache(f'{conversation_id}.json'))
+            result = get_cache(f'{conversation_id}.json')
         except Exception as e:
             result = self.chatgpt.get_conversation(conversation_id, token=self.token_key)
             set_cache(f'{conversation_id}.json', result)
@@ -255,7 +255,7 @@ class ChatBotServer(object):
 
     def update_token(self, access_token):
         access_token = access_token.strip()
-        redis_client.set('OPENAI_ACCESS_TOKEN', access_token)
+        set_cache('OPENAI_ACCESS_TOKEN', access_token)
         self.chatgpt = ChatGPT(access_token, self.chatgpt.proxy)
 
     def process_command(self, command, data: dict = None, callback: TypeCallback = Questions.callback):
@@ -278,7 +278,7 @@ class ChatBotServer(object):
             return json.dumps(data, ensure_ascii=False)
         elif '/token' == command:
             token = text
-            self.update_token.update_token(token)
+            self.update_token(token)
             return '已更新Token'
         else:
             return self.get_print_usage()

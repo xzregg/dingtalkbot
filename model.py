@@ -22,7 +22,7 @@ REDIS_LOCK_TIMEOUT = 60
 def get_cache(name):
     try:
         content = redis_client.get(name)
-        return content.decode()
+        return json.loads(content.decode())
     except Exception:
         return ''
 
