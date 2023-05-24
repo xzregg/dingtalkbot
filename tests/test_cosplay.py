@@ -13,12 +13,11 @@ from cosplay import get_role_prompt
 # @Desc    :
 class TestCustomerService(TestCase):
     def test_get_prompt(self):
-        text = '朴食 用户注册'
-        # errmsg,hint_prompt, prompt = get_role_prompt('', text)
-        # errmsg, hint_prompt,prompt = get_role_prompt(text, '用户注册')
-        # print(errmsg, len(prompt), prompt)
-        errmsg, hint_prompt, prompt = get_role_prompt('', text)
-        print(errmsg, len(prompt), hint_prompt.replace("%s", prompt))
+        text = '傻逼'
+
+        role_prompt = get_role_prompt('', text)
+        text = role_prompt.get_text()
+        print(role_prompt.errmsg,text)
         chat_bot = ChatBotServer()
-        res = chat_bot.talk(Questions(prompt, {}))
+        res = chat_bot.talk(Questions(text, {}))
         # print(res)

@@ -65,8 +65,8 @@ class ChatBotServerException(Exception):
 
 @dataclass
 class Questions:
-    text: str
-    data: dict
+    text: str = ''
+    data: dict = None
     callback: typing.Callable = lambda q, r: r
     message_id: str = field(default_factory=ChatPrompt.gen_message_id)
     parent_id: str = ''
@@ -139,6 +139,7 @@ class ChatBotServer(object):
                                                         'session_id': q.session_id, 'create_time': time.time(),
                                                         'content'   : {'parts': [q.text]},
                                                         'parent_id' : q.parent_id,
+                                                        'hint'      : q.hint,
                                                         'author'    : q.author})
 
     def check_talk(self, text, context: any, user_id='', conversation_title='', callback: TypeCallback = None):
@@ -154,10 +155,12 @@ class ChatBotServer(object):
                 msg = '机器人队列已满,请稍后再提问! %s ' % self.get_current_qsize_text()
                 text = ''
             if text:
-                msg, hint_text, prompt = get_role_prompt(conversation_title or '', text)
+                role_prompt = get_role_prompt(conversation_title or '', text)
+                msg = role_prompt.errmsg
+                text = role_prompt.get_text()
+                prompt = role_prompt.prompt
                 if not msg:
-                    text = hint_text.replace('%s', prompt)
-                    prompt_id = self.add_async_talk(text, context, callback, hint=hint_text, author=user_id)
+                    prompt_id = self.add_async_talk(text, context, callback, hint=role_prompt.hint_prompt, author=user_id)
                     if prompt_id:
                         msg = '已收到,请留意回答! %s' % self.get_current_qsize_text()
                         prompt_link = self.generate_prompt_link(prompt_id)

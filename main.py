@@ -21,7 +21,7 @@ from fastapi.staticfiles import StaticFiles
 from wechatpy.utils import to_text
 
 from chat_server import ChatBotServer, Questions
-from cosplay import SensitiveRole
+from cosplay import SensitiveRolePrompt
 from dingtalk import DingtalkChatbot, MsgMakerDingtalkChatbot
 from model import ConversationsModel
 from sdk.wxbot.WXBizMsgCrypt import WXBizMsgCrypt
@@ -145,12 +145,11 @@ async def dinkbot(body: dict = Body(...), request: Request = None) -> Any:
         text = ''
         msg = '不支持的消息类型'
 
-    senderStaffId = data.senderStaffId
+    senderStaffId = data.senderStaffId or ''
     at_dingtalk_ids = [senderStaffId] if senderStaffId else []
     at_text = ('@' + ('@'.join(at_dingtalk_ids)) if at_dingtalk_ids and is_group_chat else '')
     is_at_all = not at_dingtalk_ids
     text = text.strip()
-
     conversationTitle = data.conversationTitle
     if text:
         def send_ding(q: Questions, reply):
@@ -168,7 +167,7 @@ async def dinkbot(body: dict = Body(...), request: Request = None) -> Any:
             prompt_link = gpt_bot.generate_prompt_link(q.message_id)
             DingtalkChatbot(data['sessionWebhook']).send_markdown(f'{prompt}', f'>{_at_text} [{prompt}]({prompt_link}):\n\n{reply}', at_dingtalk_ids=_at_dingtalk_ids, is_at_all=_is_at_all)
 
-        msg = gpt_bot.check_talk(text, data, senderStaffId, conversationTitle, send_ding)
+        msg = gpt_bot.check_talk(text, data, data.senderNick or senderStaffId, conversationTitle, send_ding)
 
     return ding_msg_maker.send_markdown(msg, f'{at_text} {msg}', at_dingtalk_ids=at_dingtalk_ids, is_at_all=is_at_all)
 
@@ -209,13 +208,14 @@ async def chat_process(body: dict = Body(...), request: Request = None):
     data['end'] = False
     data['id'] = prompt_id
     if not prompt_id and prompt:
-        errmsg, hint_prompt = SensitiveRole().get_prompt_tpl(prompt)
+        role_prompt = SensitiveRolePrompt(prompt).set_prompt_tpl(prompt)
+        errmsg = role_prompt.errmsg
         if errmsg:
             data['text'] = errmsg
             data['end'] = True
         else:
-            text = hint_prompt % prompt
-            prompt_id = gpt_bot.add_async_talk(text, body, lambda d, s: '', parentMessageId, hint=hint_prompt, session_id=session_id)
+            text = role_prompt.get_text()
+            prompt_id = gpt_bot.add_async_talk(text, body, lambda d, s: '', parentMessageId, hint=role_prompt.hint_prompt, session_id=session_id)
             if not prompt_id:
                 data['text'] = '机器人提交失败,请稍后再提问!'
                 data['end'] = True

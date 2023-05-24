@@ -6,6 +6,8 @@
 # @Contact : xzregg@gmail.com
 # @Desc    :
 import json
+import time
+import traceback
 
 import redis
 from addict import Addict
@@ -141,12 +143,18 @@ class KnowledgeModel(BaseEsModel):
                 {'term': {'doc_type': data.doc_type}}
         ]
         query.size = 1
-        with redis_client.lock(f"KnowledgeModel:INDEX:{data.title}", timeout=REDIS_LOCK_TIMEOUT):
-            search_results = cls._es.search(index=cls._es_index_name, body=query, _source=False)
-            if search_results['hits']['total']['value'] > 0:
-                index_id = search_results['hits']['hits'][0]['_id']
-            result = cls._es.index(index=cls._es_index_name, id=index_id, body=data)
-        return f'[{title}] 更新成功!'
+        for i in range(3):
+            try:
+                with redis_client.lock(f"KnowledgeModel:INDEX:{data.title}", timeout=REDIS_LOCK_TIMEOUT):
+                    search_results = cls._es.search(index=cls._es_index_name, body=query, _source=False)
+                    if search_results['hits']['total']['value'] > 0:
+                        index_id = search_results['hits']['hits'][0]['_id']
+                    result = cls._es.index(index=cls._es_index_name, id=index_id, body=data)
+                    return f'[{title}] 更新成功!'
+            except Exception as e:
+                traceback.print_exc()
+                time.sleep(0.5)
+        return f'[{title}] 更新失败!'
 
     @classmethod
     def delete_from_title(cls, title):

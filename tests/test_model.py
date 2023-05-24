@@ -11,7 +11,8 @@ from unittest import TestCase
 
 from elasticsearch.helpers import bulk
 from faker import Faker
-
+import itchat
+itchat.login
 from model import KnowledgeModel, ConversationsModel
 
 fake = Faker('zh_CN')  # 指定语言为中文

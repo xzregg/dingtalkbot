@@ -8,7 +8,7 @@ import time
 from unittest import TestCase
 from pprint import pprint
 from unittest import TestCase
-from cosplay import CustomerServiceRole, get_role_prompt
+from cosplay import CustomerServiceRolePrompt, get_role_prompt
 from chat_server import ChatGPT, ChatBotServer, Questions
 
 
